@@ -1,0 +1,344 @@
+#! /usr/bin/env python3
+
+# Compares two directory trees.  Use this script to, for example,
+# compare a filesystem to a backup.  The output is similar to that
+# produced by 'diff -qr', but this script also compares file
+# attributes (permissions, etc.) and is more intelligent about
+# symbolic links (it does not follow symbolic links, but compares the
+# links themselves).
+#
+# File attributes that are NOT compared: device number; inode number;
+# number of hard links; number of blocks; last access time; last
+# status change time; and non-POSIX attributes.
+#
+# Note: permissions and modification times of symbolic links are not
+# compared because these attributes are typically not preserved by
+# copy or backup tools.
+#
+# Usage: difftree [options] [-m time] [label=]tree1 [-m time] [label=]tree2
+#
+# Options:
+#    -M                   ignore modification time differences
+#    -e excludepatterns   ignore items matching patterns
+#
+# Example: difftree current=/ backup=/Volumes/Backup/
+# Example: difftree -m 2013-05-01-093500 current=/
+#    backup=/Volumes/Backup/.../2013-05-01-093500/
+#
+# The -M option causes modification time differences to be ignored.
+#
+# The -e option can be used to supply a file containing patterns of
+# items to ignore.  Each line of the file should have the form:
+#
+#    type regexp
+#
+# where 'type' is one of:
+#
+#    file
+#    directory
+#    symbolic_link
+#    named_pipe
+#    character_device
+#    block_device
+#    socket
+#
+# and 'regexp' is a regular expression against which item relative
+# pathnames will be matched.  Blank lines and lines beginning with '#'
+# are ignored.  For example:
+#
+#    file .*-shm$
+#    directory .*/Caches$
+#
+# Ignored directories are not descended into.
+#
+# The -m option can be used to ignore differences that are due to
+# files being modified since a given time.  The argument to the -m
+# option should be a timestamp in the syntax YYYY-MM-DD-HHMMSS; the
+# option applies to the subsequent tree on the command line.  If
+# present, modification time differences (and, for regular files, size
+# and checksum differences where modification time differences are
+# present) are ignored if the modification time of the file in the
+# subsequent tree is more recent than the given time.  The intended
+# use of the -m option, as demonstrated in the example above, is to
+# copy the timestamp from a backup and apply it to the current
+# directory tree.  Note, though, that Time Machine backups are dated
+# by when they end, not when they start, so in practice some time may
+# need to be subtracted from the timestamp to get the desired effect.
+#
+# Greg Janee <gregjanee@gmail.com>
+
+import collections
+import hashlib
+import os
+import re
+import stat
+import sys
+import time
+import unicodedata
+
+def format_exception(exception):
+    return f"{type(exception).__name__}: {exception!s}"
+
+def error(exception_type, exception, traceback):
+    print("difftree: " + format_exception(exception), file=sys.stderr)
+    sys.exit(1)
+sys.excepthook = error
+
+# Global variables, set during argument parsing
+ignore_mtimes = False
+exclude_patterns = []  # [(type, regexp), ...]
+
+Tree = collections.namedtuple("Tree", "label root mtime_threshold")
+
+class FilesystemEntry:
+
+    def __init__(self, tree, relpath):
+        self.tree = tree
+        self.relpath = relpath  # path relative to tree root
+        self.abspath = os.path.join(tree.root, relpath)
+        s = os.lstat(self.abspath)
+        self.mode = s.st_mode
+        self.uid = s.st_uid
+        self.gid = s.st_gid
+        # N.B.: st_mtime is a float, and different filesystems support
+        # different time precisions.  For uniformity we cast it down
+        # to an integer number of seconds.
+        self.mtime = int(s.st_mtime)
+        if self.is_file:
+            self.size = s.st_size
+            self.checksum_value = None
+        elif self.is_symbolic_link:
+            self.target = os.readlink(self.abspath)
+
+    @property
+    def type(self):
+        if stat.S_ISREG(self.mode):
+            return "file"
+        elif stat.S_ISDIR(self.mode):
+            return "directory"
+        elif stat.S_ISLNK(self.mode):
+            return "symbolic_link"
+        elif stat.S_ISFIFO(self.mode):
+            return "named_pipe"
+        elif stat.S_ISCHR(self.mode):
+            return "character_device"
+        elif stat.S_ISBLK(self.mode):
+            return "block_device"
+        elif stat.S_ISSOCK(self.mode):
+            return "socket"
+        else:
+            return "unknown"
+
+    @property
+    def is_file(self):
+        return self.type == "file"
+
+    @property
+    def is_directory(self):
+        return self.type == "directory"
+
+    @property
+    def is_symbolic_link(self):
+        return self.type == "symbolic_link"
+
+    @property
+    def perms(self):
+        return stat.S_IMODE(self.mode)
+
+    @property
+    def checksum(self):
+        assert self.is_file
+        if self.checksum_value == None:
+            f = open(self.abspath, "rb")
+            h = hashlib.md5()
+            while True:
+                b = f.read(1048576)
+                if len(b) == 0:
+                    break
+                h.update(b)
+            f.close()
+            self.checksum_value = h.digest()
+        return self.checksum_value
+
+    def compare(self, other):
+        diffs = []
+        def cmp(attr, formatter=lambda v: v):
+            a = getattr(self, attr)
+            b = getattr(other, attr)
+            if a == b:
+                return True
+            else:
+                if formatter(a) != None:
+                    diffs.append(
+                        (f"{attr}={formatter(a)}", f"{attr}={formatter(b)}")
+                    )
+                else:
+                    diffs.append((attr, attr))
+                return False
+        if cmp("type"):
+            # N.B.: The order of checks is important to the logic
+            # below.
+            cmp("uid")
+            cmp("gid")
+            if self.is_symbolic_link:
+                cmp("target")
+            else:
+                cmp("perms", lambda v: stat.filemode(v)[1:])
+                cmp("mtime", lambda v: time.asctime(time.localtime(v)))
+            if self.is_file:
+                cmp("size")
+                cmp("checksum", lambda v: None)
+        if len(diffs) > 0 and diffs[0][0].startswith("mtime"):
+            if (
+                (ignore_mtimes and len(diffs) == 1)
+                or (
+                    self.tree.mtime_threshold != None
+                    and self.mtime > self.tree.mtime_threshold
+                )
+                or (
+                    other.tree.mtime_threshold != None
+                    and other.mtime > other.tree.mtime_threshold
+                )
+            ):
+                diffs = []
+        if len(diffs) > 0:
+            print(f"{self.type} {self.relpath} differs")
+            l1 = ""
+            l2 = ""
+            for a, b in diffs:
+                if l1 != "":
+                    l1 += ", "
+                    l2 += ", "
+                m = max(len(a), len(b))
+                l1 += f"{a:>{m}}"
+                l2 += f"{b:>{m}}"
+            m = max(len(self.tree.label), len(other.tree.label))
+            print(f"{self.tree.label:>{m+3}}: {l1}")
+            print(f"{other.tree.label:>{m+3}}: {l2}", flush=True)
+
+def list_directory(tree, relpath):
+    def is_excluded(type, relpath):
+        return any(
+            t == type and p.match(relpath)
+            for t, p in exclude_patterns
+        )
+    # We must normalize Unicode characters in pathnames because
+    # different filesystems can use different encodings.
+    l = [
+        FilesystemEntry(
+            tree,
+            unicodedata.normalize("NFKC", os.path.join(relpath, e))
+        )
+        for e in os.listdir(os.path.join(tree.root, relpath))
+    ]
+    l.sort(key=lambda e: e.relpath)
+    return list(filter(lambda e: not is_excluded(e.type, e.relpath), l))
+
+def compare_directories(tree1, tree2, relpath):
+    l1 = list_directory(tree1, relpath)
+    l2 = list_directory(tree2, relpath)
+    subdirs = []
+    i1 = i2 = 0
+    while i1 < len(l1) or i2 < len(l2):
+        if i1 < len(l1) and (i2 >= len(l2) or l1[i1].relpath < l2[i2].relpath):
+            print(
+                f"only in {tree1.label}: {l1[i1].type} {l1[i1].relpath}",
+                flush=True
+            )
+            i1 += 1
+        elif (
+            i2 < len(l2)
+            and (i1 >= len(l1) or l1[i1].relpath > l2[i2].relpath)
+        ):
+            print(
+                f"only in {tree2.label}: {l2[i2].type} {l2[i2].relpath}",
+                flush=True
+            )
+            i2 += 1
+        else:
+            l1[i1].compare(l2[i2])
+            if l1[i1].is_directory and l2[i2].is_directory:
+                subdirs.append(l1[i1].relpath)
+            i1 += 1
+            i2 += 1
+    for d in subdirs:
+        compare_directories(tree1, tree2, d)
+
+# Argument parsing
+
+def load_exclude_patterns(file):
+    f = open(file)
+    for n, line in enumerate(f, start=1):
+        if line.strip() == "" or line.startswith("#"):
+            continue
+        try:
+            type, pattern = line.strip().split(maxsplit=1)
+            assert type in [
+                "file",
+                "directory",
+                "symbolic_link",
+                "named_pipe",
+                "character_device",
+                "block_device",
+                "socket",
+            ], "invalid type"
+            exclude_patterns.append((type, re.compile(pattern)))
+        except Exception as e:
+            raise Exception(f"{file}:{n}: {format_exception(e)}")
+    f.close()
+
+def usage_error():
+    print(
+        "Usage: difftree [options] [-m time] [label=]tree1 "
+        + "[-m time] [label=]tree2\n"
+        + "\n"
+        + "Options:\n"
+        + "   -M                   ignore modification time differences\n"
+        + "   -e excludepatterns   ignore items matching patterns\n"
+        + "\n"
+        + "Example: difftree current=/ backup=/Volumes/Backup/\n"
+        + "Example: difftree -m 2013-05-01-093500 current=/\n"
+        + "   backup=/Volumes/Backup/.../2013-05-01-093500/",
+        file=sys.stderr
+    )
+    sys.exit(1)
+
+def pop_argv():
+    if len(sys.argv) < 2:
+        usage_error()
+    v = sys.argv[1]
+    del sys.argv[1]
+    return v
+
+while len(sys.argv) >= 2 and sys.argv[1] in ["-M", "-e"]:
+    if sys.argv[1] == "-M":
+        ignore_mtimes = True
+        pop_argv()
+    else:
+        pop_argv()
+        load_exclude_patterns(pop_argv())
+
+def configure_tree(n):
+    mtime = None
+    v = pop_argv()
+    if v == "-m":
+        v = pop_argv()
+        mtime = int(time.mktime(time.strptime(v, "%Y-%m-%d-%H%M%S")))
+        v = pop_argv()
+    m = re.match("(\w+)=(.*)", v)
+    if m:
+        label = m.group(1)
+        v = m.group(2)
+    else:
+        label = f"tree{n}"
+    return Tree(label, v, mtime)
+
+tree1 = configure_tree(1)
+tree2 = configure_tree(2)
+
+if len(sys.argv) > 1:
+    usage_error()
+
+# Execution
+
+compare_directories(tree1, tree2, "")

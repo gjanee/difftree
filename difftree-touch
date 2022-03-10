@@ -1,0 +1,59 @@
+#! /usr/bin/env python3
+
+# Reads an output logfile produced by difftree and touches each file
+# mentioned in it, that is, sets access and modification times to the
+# current time.  This seems to trigger Time Machine to "notice" that
+# the files need to be backed up.  (For good measure, for each file
+# touched, the parent directory is also touched.)  Thus, if there are
+# persistent differences between a filesystem and its Time Machine
+# backups, running this script causes those differences to be
+# eliminated in the next backup.
+#
+# Usage: difftree-touch label=tree logfile
+#
+# 'tree' should be the non-backup directory tree difftree was
+# originally run against.
+#
+# Greg Janee <gregjanee@gmail.com>
+
+import errno
+import os
+import re
+import sys
+
+def format_exception(exception):
+    return f"{type(exception).__name__}: {exception!s}"
+
+def error(exception_type, exception, traceback):
+    print("difftree-touch: " + format_exception(exception), file=sys.stderr)
+    sys.exit(1)
+sys.excepthook = error
+
+if len(sys.argv) != 3 or not re.match("(\w+)=(.*)", sys.argv[1]):
+    print("Usage: difftree-touch label=tree logfile", file=sys.stderr)
+    sys.exit(1)
+
+label, tree = re.match("(\w+)=(.*)", sys.argv[1]).groups()
+logfile = sys.argv[2]
+
+def touch(file):
+    try:
+        os.utime(file, follow_symlinks=False)
+    except OSError as e:
+        if e.errno == errno.ENOENT:
+            print(
+                f"diffree-touch: warning: {format_exception(e)}: {file}",
+                file=sys.stderr
+            )
+        else:
+            raise
+
+for line in open(logfile):
+    m = (
+        re.match("(file|directory) (.*) differs$", line[:-1])
+        or re.match(f"only in {label}: (file|directory) (.*)", line[:-1])
+    )
+    if m:
+        file = os.path.join(tree, m.group(2))
+        touch(file)
+        touch(os.path.dirname(file))
