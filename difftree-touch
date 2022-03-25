@@ -42,7 +42,7 @@ def touch(file):
     except OSError as e:
         if e.errno == errno.ENOENT:
             print(
-                f"diffree-touch: warning: {format_exception(e)}: {file}",
+                f"difftree-touch: warning: {format_exception(e)}: {file}",
                 file=sys.stderr
             )
         else:
