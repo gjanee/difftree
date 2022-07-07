@@ -11,8 +11,12 @@
 #
 # Usage: difftree-touch label=tree logfile
 #
-# 'tree' should be the non-backup directory tree difftree was
-# originally run against.
+# `tree` should be the (non-backup) directory tree difftree was
+# originally run against.  For example, if difftree was run against
+# the home directory with label "current", then this script would be
+# invoked as:
+#
+# difftree-touch current=$HOME logfile
 #
 # Greg Janee <gregjanee@gmail.com>
 
