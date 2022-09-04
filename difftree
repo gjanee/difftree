@@ -1,4 +1,4 @@
-#! /usr/bin/env python3
+#! /usr/bin/env python3 -u
 
 # Compares two directory trees.  Use this script to, for example,
 # compare a filesystem to a backup.  The output is similar to that
@@ -19,13 +19,21 @@
 #
 # Options:
 #    -M                   ignore modification time differences
+#    -E                   ignore Time Machine exclusions
 #    -e excludepatterns   ignore items matching patterns
 #
 # Example: difftree current=/ backup=/Volumes/Backup/
 # Example: difftree -m 2013-05-01-093500 current=/
 #    backup=/Volumes/Backup/.../2013-05-01-093500/
 #
-# The -M option causes modification time differences to be ignored.
+# The -M option causes modification time differences to be ignored
+# (but if other differences are found, modification time differences
+# are reported as well).
+#
+# The -E option causes items that are excluded by Time Machine (as
+# reported by 'tmutil isexcluded') to be ignored (but only where items
+# are missing; differences are still reported if the item exists in
+# both trees).
 #
 # The -e option can be used to supply a file containing patterns of
 # items to ignore.  Each line of the file should have the form:
@@ -57,7 +65,7 @@
 # option applies to the subsequent tree on the command line.  If
 # present, modification time differences (and, for regular files, size
 # and checksum differences where modification time differences are
-# present) are ignored if the modification time of the file in the
+# present) are ignored if the modification time of the item in the
 # subsequent tree is more recent than the given time.  The intended
 # use of the -m option, as demonstrated in the example above, is to
 # copy the timestamp from a backup and apply it to the current
@@ -72,6 +80,7 @@ import hashlib
 import os
 import re
 import stat
+import subprocess
 import sys
 import time
 import unicodedata
@@ -86,6 +95,7 @@ sys.excepthook = error
 
 # Global variables, set during argument parsing
 ignore_mtimes = False
+ignore_time_machine_excludes = False
 exclude_patterns = []  # [(type, regexp), ...]
 
 Tree = collections.namedtuple("Tree", "label root mtime_threshold")
@@ -214,7 +224,7 @@ class FilesystemEntry:
                 l2 += f"{b:>{m}}"
             m = max(len(self.tree.label), len(other.tree.label))
             print(f"{self.tree.label:>{m+3}}: {l1}")
-            print(f"{other.tree.label:>{m+3}}: {l2}", flush=True)
+            print(f"{other.tree.label:>{m+3}}: {l2}")
 
 def list_directory(tree, relpath):
     def is_excluded(type, relpath):
@@ -234,6 +244,15 @@ def list_directory(tree, relpath):
     l.sort(key=lambda e: e.relpath)
     return list(filter(lambda e: not is_excluded(e.type, e.relpath), l))
 
+def is_time_machine_excluded(path):
+    cp = subprocess.run(
+        ["tmutil", "isexcluded", path],
+        check=True,
+        capture_output=True,
+        encoding="UTF-8"
+    )
+    return cp.stdout.startswith("[Excluded]")
+
 def compare_directories(tree1, tree2, relpath):
     l1 = list_directory(tree1, relpath)
     l2 = list_directory(tree2, relpath)
@@ -241,19 +260,21 @@ def compare_directories(tree1, tree2, relpath):
     i1 = i2 = 0
     while i1 < len(l1) or i2 < len(l2):
         if i1 < len(l1) and (i2 >= len(l2) or l1[i1].relpath < l2[i2].relpath):
-            print(
-                f"only in {tree1.label}: {l1[i1].type} {l1[i1].relpath}",
-                flush=True
-            )
+            if not (
+                ignore_time_machine_excludes
+                and is_time_machine_excluded(l1[i1].abspath)
+            ):
+                print(f"only in {tree1.label}: {l1[i1].type} {l1[i1].relpath}")
             i1 += 1
         elif (
             i2 < len(l2)
             and (i1 >= len(l1) or l1[i1].relpath > l2[i2].relpath)
         ):
-            print(
-                f"only in {tree2.label}: {l2[i2].type} {l2[i2].relpath}",
-                flush=True
-            )
+            if not (
+                ignore_time_machine_excludes
+                and is_time_machine_excluded(l2[i2].abspath)
+            ):
+                print(f"only in {tree2.label}: {l2[i2].type} {l2[i2].relpath}")
             i2 += 1
         else:
             l1[i1].compare(l2[i2])
@@ -294,6 +315,7 @@ def usage_error():
         + "\n"
         + "Options:\n"
         + "   -M                   ignore modification time differences\n"
+        + "   -E                   ignore Time Machine exclusions\n"
         + "   -e excludepatterns   ignore items matching patterns\n"
         + "\n"
         + "Example: difftree current=/ backup=/Volumes/Backup/\n"
@@ -310,9 +332,12 @@ def pop_argv():
     del sys.argv[1]
     return v
 
-while len(sys.argv) >= 2 and sys.argv[1] in ["-M", "-e"]:
+while len(sys.argv) >= 2 and sys.argv[1] in ["-M", "-E", "-e"]:
     if sys.argv[1] == "-M":
         ignore_mtimes = True
+        pop_argv()
+    elif sys.argv[1] == "-E":
+        ignore_time_machine_excludes = True
         pop_argv()
     else:
         pop_argv()
