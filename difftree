@@ -232,12 +232,19 @@ def list_directory(tree, relpath):
             t == type and p.match(relpath)
             for t, p in exclude_patterns
         )
-    # We must normalize Unicode characters in pathnames because
-    # different filesystems can use different encodings.
+    # It seems that macOS treats canonically equivalent Unicode
+    # characters (e.g., LATIN SMALL LETTER E WITH ACUTE vs. LATIN
+    # SMALL LETTER E + COMBINING ACUTE ACCENT) as being identical, at
+    # least when opening files.  And oddly enough, different character
+    # forms can arise between different filesystems (how?).  So for
+    # comparison purposes we normalize such characters.  However,
+    # Unicode characters that have compatibility equivalence (e.g.,
+    # NARROW NO-BREAK SPACE vs. SPACE) do *not* seem to be considered
+    # identical.  So we normalize to NFC, but not NFKC.
     l = [
         FilesystemEntry(
             tree,
-            unicodedata.normalize("NFKC", os.path.join(relpath, e))
+            unicodedata.normalize("NFC", os.path.join(relpath, e))
         )
         for e in os.listdir(os.path.join(tree.root, relpath))
     ]
