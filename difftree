@@ -357,7 +357,7 @@ def configure_tree(n):
         v = pop_argv()
         mtime = int(time.mktime(time.strptime(v, "%Y-%m-%d-%H%M%S")))
         v = pop_argv()
-    m = re.match("(\w+)=(.*)", v)
+    m = re.match(r"(\w+)=(.*)", v)
     if m:
         label = m.group(1)
         v = m.group(2)

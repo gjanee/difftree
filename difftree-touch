@@ -33,11 +33,11 @@ def error(exception_type, exception, traceback):
     sys.exit(1)
 sys.excepthook = error
 
-if len(sys.argv) != 3 or not re.match("(\w+)=(.*)", sys.argv[1]):
+if len(sys.argv) != 3 or not re.match(r"(\w+)=(.*)", sys.argv[1]):
     print("Usage: difftree-touch label=tree logfile", file=sys.stderr)
     sys.exit(1)
 
-label, tree = re.match("(\w+)=(.*)", sys.argv[1]).groups()
+label, tree = re.match(r"(\w+)=(.*)", sys.argv[1]).groups()
 logfile = sys.argv[2]
 
 def touch(file):
